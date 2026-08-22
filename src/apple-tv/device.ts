@@ -1,7 +1,7 @@
 import { AIRPLAY_SERVICE, AppleTV, COMPANION_LINK_SERVICE, ConnectionRecovery, type DiscoveryResult, type MdnsService, mdnsUnicast, Proto } from '@basmilius/apple-sdk';
 import { DiscoverableDevice } from '../base';
 import { AirPlayLogic } from '../logic';
-import { capabilityToRepeatMode, getAccessoryCredentialsFromDevice } from '../utils';
+import { capabilityToRepeatMode, getAccessoryCredentialsFromDevice, requestConnectionRecovery, SingleFlight } from '../utils';
 import type AppleTVDriver from './driver';
 import type Homey from 'homey';
 
@@ -70,6 +70,7 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
     #airplayRecovery?: ConnectionRecovery;
     #companionLinkRecovery?: ConnectionRecovery;
     #companionLinkRetried = false;
+    #connectFlight = new SingleFlight<void>();
     #connectedOnce = false;
     #slowRecoveryAttempt = 0;
     #slowRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -106,6 +107,10 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
     }
 
     async #connect(): Promise<void> {
+        return this.#connectFlight.run(() => this.#connectOnce());
+    }
+
+    async #connectOnce(): Promise<void> {
         try {
             const credentials = getAccessoryCredentialsFromDevice(this);
 
@@ -143,8 +148,11 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
             this.log('Connecting to Apple TV...');
             await this.#tv.connect(credentials);
         } catch (err) {
-            this.error('Error received', err);
+            this.error('[connection]', 'Failed to connect to Apple TV.', err);
             await this.setUnavailable('Cannot connect to Apple TV.');
+
+            requestConnectionRecovery(this.#tv?.airplay, this.#airplayRecovery);
+            requestConnectionRecovery(this.#tv?.companionLink, this.#companionLinkRecovery);
         }
     }
 
@@ -206,6 +214,7 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
 
             this.log('Disconnected from Apple TV (AirPlay), reconnecting...');
             await this.setUnavailable('Disconnected from Apple TV (AirPlay), reconnecting...');
+            await this.#airplayLogic.clearNowPlaying();
             this.#airplayRecovery?.handleDisconnect(unexpected);
         });
 
@@ -523,5 +532,17 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
 
         this.#connectedOnce = true;
         await this.#connect();
+    }
+
+    async onServiceUpdated(service: string, discoveryResult: DiscoveryResult): Promise<void> {
+        await super.onServiceUpdated(service, discoveryResult);
+
+        if (!this.#tv) {
+            await this.#connect();
+            return;
+        }
+
+        requestConnectionRecovery(this.#tv.airplay, this.#airplayRecovery);
+        requestConnectionRecovery(this.#tv.companionLink, this.#companionLinkRecovery);
     }
 }

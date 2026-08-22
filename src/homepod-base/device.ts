@@ -2,7 +2,7 @@ import { Url } from '@basmilius/apple-audio-source';
 import { AIRPLAY_SERVICE, ConnectionRecovery, type DiscoveryResult, HomePod, Proto } from '@basmilius/apple-sdk';
 import { DiscoverableDevice } from '../base';
 import { AirPlayLogic } from '../logic';
-import { capabilityToRepeatMode } from '../utils';
+import { capabilityToRepeatMode, requestConnectionRecovery, SingleFlight } from '../utils';
 import type HomePodBaseDriver from './driver';
 import type Homey from 'homey';
 
@@ -52,6 +52,7 @@ export default abstract class HomePodBaseDevice<TDriver extends HomePodBaseDrive
 
     #airplayLogic!: AirPlayLogic;
     #connectedOnce = false;
+    #connectFlight = new SingleFlight<void>();
     #pod?: HomePod;
     #recovery?: ConnectionRecovery;
     #services!: Record<string, Homey.DiscoveryStrategy>;
@@ -86,6 +87,10 @@ export default abstract class HomePodBaseDevice<TDriver extends HomePodBaseDrive
     }
 
     async #connect(): Promise<void> {
+        return this.#connectFlight.run(() => this.#connectOnce());
+    }
+
+    async #connectOnce(): Promise<void> {
         try {
             if (!this.discoveryResult) {
                 await this.setUnavailable('Service discovery not complete, waiting for device...');
@@ -107,8 +112,10 @@ export default abstract class HomePodBaseDevice<TDriver extends HomePodBaseDrive
 
             await this.#pod.connect();
         } catch (err) {
-            this.error('Error received', err);
+            this.error('[connection]', 'Failed to connect to HomePod.', err);
             await this.setUnavailable('Cannot connect to HomePod.');
+
+            requestConnectionRecovery(this.#pod?.airplay, this.#recovery);
         }
     }
 
@@ -130,6 +137,7 @@ export default abstract class HomePodBaseDevice<TDriver extends HomePodBaseDrive
 
             this.log('Disconnected from HomePod, reconnecting...');
             await this.setUnavailable('Disconnected from HomePod, reconnecting...');
+            await this.#airplayLogic.clearNowPlaying();
             this.#recovery?.handleDisconnect(unexpected);
         });
     }
@@ -271,6 +279,16 @@ export default abstract class HomePodBaseDevice<TDriver extends HomePodBaseDrive
 
         this.#connectedOnce = true;
         await this.#connect();
+    }
+
+    async onServiceUpdated(service: string, discoveryResult: DiscoveryResult): Promise<void> {
+        await super.onServiceUpdated(service, discoveryResult);
+
+        if (!this.#pod) {
+            await this.#connect();
+        } else {
+            requestConnectionRecovery(this.#pod.airplay, this.#recovery);
+        }
     }
 
     async playUrl(url: string, volume?: number): Promise<void> {

@@ -4,7 +4,7 @@ import type { AppleApp } from '../types';
 import Homey from 'homey';
 import AppleTVDevice from '../apple-tv/device';
 import HomePodBaseDevice from '../homepod-base/device';
-import { getFallbackArtworkUrl, repeatModeToCapability, safeCapabilityValue } from '../utils';
+import { getFallbackArtworkUrl, normalizePlaybackState, repeatModeToCapability, safeCapabilityValue } from '../utils';
 
 export type MiniPlayerState = {
     readonly deviceId: string;
@@ -35,7 +35,7 @@ export default class AirPlayLogic extends Shortcuts<AppleApp> {
     }
 
     get position(): number {
-        return this.#sdkDevice?.state.elapsedTime ?? 0;
+        return this.#normalizedTiming().position;
     }
 
     get positionTimestamp(): number {
@@ -252,12 +252,18 @@ export default class AirPlayLogic extends Shortcuts<AppleApp> {
         }, 300);
     }
 
-    async onPlaybackStateChanged(_client: AirPlayClient, _player: AirPlayPlayer, _oldState: Proto.PlaybackState_Enum, newState: Proto.PlaybackState_Enum): Promise<void> {
-        // Fast path: update speaker_playing immediately without debounce.
-        // The full nowPlayingChanged event will handle the rest.
+    async onPlaybackStateChanged(client: AirPlayClient, _player: AirPlayPlayer, _oldState: Proto.PlaybackState_Enum, newState: Proto.PlaybackState_Enum): Promise<void> {
+        // Fast path: freeze a valid position as soon as playback pauses.
+        // The full nowPlayingChanged event will handle the remaining metadata.
         try {
             const isPlaying = newState === Proto.PlaybackState_Enum.Playing;
-            await this.#device.setCapabilityValue('speaker_playing', isPlaying);
+            const timing = normalizePlaybackState(client.elapsedTime, client.duration);
+
+            await Promise.allSettled([
+                this.#device.setCapabilityValue('speaker_playing', isPlaying),
+                this.#device.setCapabilityValue('speaker_duration', timing.duration),
+                this.#device.setCapabilityValue('speaker_position', timing.position)
+            ]);
             this.#emitMiniPlayerUpdate();
         } catch (err) {
             this.log(this.deviceName, 'Failed to update playback state', err);
@@ -394,15 +400,16 @@ export default class AirPlayLogic extends Shortcuts<AppleApp> {
         }
 
         try {
-            await this.#syncDynamicCapabilities(client);
+            await this.#syncOutputCapabilities();
+            const timing = normalizePlaybackState(client.elapsedTime, client.duration);
 
             await Promise.allSettled([
                 this.#device.setCapabilityValue('speaker_playing', client.isPlaying),
                 this.#device.setCapabilityValue('speaker_album', client.album),
                 this.#device.setCapabilityValue('speaker_artist', client.artist || client.activePlayer?.currentItemMetadata?.trackArtistName || client.displayName || '-'),
                 this.#device.setCapabilityValue('speaker_track', client.title),
-                this.#device.setCapabilityValue('speaker_duration', client.duration),
-                this.#device.setCapabilityValue('speaker_position', client.elapsedTime)
+                this.#device.setCapabilityValue('speaker_duration', timing.duration),
+                this.#device.setCapabilityValue('speaker_position', timing.position)
             ]);
 
             if (this.#device.hasCapability('speaker_repeat')) {
@@ -424,24 +431,11 @@ export default class AirPlayLogic extends Shortcuts<AppleApp> {
         }
     }
 
-    async #syncDynamicCapabilities(client: AirPlayClient): Promise<void> {
-        const capabilities: Array<[string, Proto.Command]> = [
-            ['speaker_next', Proto.Command.NextTrack],
-            ['speaker_prev', Proto.Command.PreviousTrack],
-            ['speaker_repeat', Proto.Command.ChangeRepeatMode],
-            ['speaker_shuffle', Proto.Command.ChangeShuffleMode]
-        ];
-
-        for (const [id, command] of capabilities) {
-            const isSupported = client.isCommandSupported(command);
-            const hasCapability = this.#device.hasCapability(id);
-
-            if (isSupported && !hasCapability) {
-                await this.#device.addCapability(id);
-            } else if (!isSupported && hasCapability) {
-                await this.#device.removeCapability(id);
-            }
-        }
+    async #syncOutputCapabilities(): Promise<void> {
+        // Playback capabilities stay installed so Homey Flow cards and device
+        // controls do not disappear when the active media app changes. The
+        // mini player uses #getFeatureAvailability() to disable unsupported
+        // controls for the current client.
 
         // Volume set is dynamically managed for Apple TV based on output device capabilities.
         if (this.#device instanceof AppleTVDevice) {
@@ -453,7 +447,7 @@ export default class AirPlayLogic extends Shortcuts<AppleApp> {
                 if (!hasVolumeSet) {
                     await this.#device.addCapability('volume_set');
                 }
-            } else {
+            } else if (hasVolumeSet) {
                 await this.#device.removeCapability('volume_set');
             }
         }
@@ -472,6 +466,11 @@ export default class AirPlayLogic extends Shortcuts<AppleApp> {
             shuffle: state.isCommandSupported(Proto.Command.ChangeShuffleMode),
             repeat: state.isCommandSupported(Proto.Command.ChangeRepeatMode)
         };
+    }
+
+    #normalizedTiming(): { duration: number; position: number } {
+        const state = this.#sdkDevice?.state;
+        return normalizePlaybackState(state?.elapsedTime, state?.activeClient?.duration);
     }
 
     #emitMiniPlayerUpdate(): void {

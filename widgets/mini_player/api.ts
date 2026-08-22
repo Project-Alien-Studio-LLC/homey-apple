@@ -4,7 +4,7 @@ import type AppleTVDevice from '../../src/apple-tv/device';
 import type HomePodBaseDevice from '../../src/homepod-base/device';
 import type { MiniPlayerState } from '../../src/logic';
 import { repeatModeToCapability } from '../../src/utils';
-import { findDevice } from '../shared';
+import { findDevice, runWidgetAction } from '../shared';
 
 type Params = {
     readonly deviceId: string;
@@ -39,13 +39,10 @@ export const set_playing = async (request: WidgetApiRequest<AppleApp, never, Par
         return false;
     }
 
-    try {
+    return runWidgetAction(request, device, 'speaker_playing', async () => {
         const current = device.getCapabilityValue('speaker_playing');
         await device.triggerCapabilityListener('speaker_playing', !current);
-        return true;
-    } catch {
-        return false;
-    }
+    });
 };
 
 export const set_next = async (request: WidgetApiRequest<AppleApp, never, Params>): Promise<boolean> => {
@@ -54,12 +51,9 @@ export const set_next = async (request: WidgetApiRequest<AppleApp, never, Params
         return false;
     }
 
-    try {
+    return runWidgetAction(request, device, 'speaker_next', async () => {
         await device.triggerCapabilityListener('speaker_next', true);
-        return true;
-    } catch {
-        return false;
-    }
+    });
 };
 
 export const set_previous = async (request: WidgetApiRequest<AppleApp, never, Params>): Promise<boolean> => {
@@ -68,12 +62,9 @@ export const set_previous = async (request: WidgetApiRequest<AppleApp, never, Pa
         return false;
     }
 
-    try {
+    return runWidgetAction(request, device, 'speaker_prev', async () => {
         await device.triggerCapabilityListener('speaker_prev', true);
-        return true;
-    } catch {
-        return false;
-    }
+    });
 };
 
 export const set_volume = async (request: WidgetApiRequest<AppleApp, VolumeBody, Params>): Promise<boolean> => {
@@ -94,12 +85,9 @@ export const set_volume = async (request: WidgetApiRequest<AppleApp, VolumeBody,
         return false;
     }
 
-    try {
+    return runWidgetAction(request, device, 'volume_set', async () => {
         await device.triggerCapabilityListener('volume_set', volumeValue);
-        return true;
-    } catch {
-        return false;
-    }
+    });
 };
 
 export const set_shuffle = async (request: WidgetApiRequest<AppleApp, ShuffleBody, Params>): Promise<boolean> => {
@@ -108,12 +96,9 @@ export const set_shuffle = async (request: WidgetApiRequest<AppleApp, ShuffleBod
         return false;
     }
 
-    try {
+    return runWidgetAction(request, device, 'speaker_shuffle', async () => {
         await device.triggerCapabilityListener('speaker_shuffle', !!request.body?.shuffle);
-        return true;
-    } catch {
-        return false;
-    }
+    });
 };
 
 export const set_repeat = async (request: WidgetApiRequest<AppleApp, RepeatBody, Params>): Promise<boolean> => {
@@ -122,10 +107,7 @@ export const set_repeat = async (request: WidgetApiRequest<AppleApp, RepeatBody,
         return false;
     }
 
-    try {
+    return runWidgetAction(request, device, 'speaker_repeat', async () => {
         await device.triggerCapabilityListener('speaker_repeat', repeatModeToCapability[request.body?.repeat] ?? 'none');
-        return true;
-    } catch {
-        return false;
-    }
+    });
 };

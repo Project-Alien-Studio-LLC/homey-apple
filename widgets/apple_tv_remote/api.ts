@@ -2,7 +2,7 @@ import type { WidgetApiRequest } from '@basmilius/homey-common';
 import type AppleApp from '../../src';
 import type AppleTVDevice from '../../src/apple-tv/device';
 import { safeCapabilityValue } from '../../src/utils';
-import { findDevice } from '../shared';
+import { findDevice, runWidgetAction } from '../shared';
 
 type Params = {
     readonly deviceId: string;
@@ -36,12 +36,9 @@ const send = async (request: WidgetApiRequest<AppleApp, never, Params>, capabili
         return false;
     }
 
-    try {
+    return runWidgetAction(request, device, capabilityId, async () => {
         await device.triggerCapabilityListener(capabilityId, value);
-        return true;
-    } catch {
-        return false;
-    }
+    });
 };
 
 export const get = async (request: WidgetApiRequest<AppleApp, never, Params>): Promise<State | null> => {
@@ -95,13 +92,10 @@ export const mute = async (request: WidgetApiRequest<AppleApp, never, Params>): 
         return false;
     }
 
-    try {
+    return runWidgetAction(request, device, 'volume_mute', async () => {
         const current = device.getCapabilityValue('volume_mute');
         await device.triggerCapabilityListener('volume_mute', !current);
-        return true;
-    } catch {
-        return false;
-    }
+    });
 };
 
 export const power = async (request: WidgetApiRequest<AppleApp, never, Params>): Promise<boolean> => {
@@ -110,11 +104,8 @@ export const power = async (request: WidgetApiRequest<AppleApp, never, Params>):
         return false;
     }
 
-    try {
+    return runWidgetAction(request, device, 'onoff', async () => {
         const current = device.getCapabilityValue('onoff');
         await device.triggerCapabilityListener('onoff', !current);
-        return true;
-    } catch {
-        return false;
-    }
+    });
 };

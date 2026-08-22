@@ -5,6 +5,6 @@ find ./node_modules -name "*.mts" -type f -delete
 
 sleep 1
 
-NOCHECK=1 homey app publish
+homey app publish
 
 bun install -f
