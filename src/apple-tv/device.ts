@@ -6,8 +6,10 @@ import type AppleTVDriver from './driver';
 import type Homey from 'homey';
 
 const RECONNECT_INTERVAL = 15 * 60 * 1000;
+const HEALTH_CHECK_INTERVAL = 2 * 60 * 1000;
 const SLOW_RECOVERY_INTERVAL = 2 * 60 * 1000;
 const SLOW_RECOVERY_MAX_ATTEMPTS = 15;
+const AIRPLAY_RECOVERY_TRIGGER_COOLDOWN = 30 * 60 * 1000;
 
 const CAPABILITIES = [
     'speaker_album',
@@ -66,6 +68,8 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
         return this.#services;
     }
 
+    #healthTimer: ReturnType<typeof setInterval> | null = null;
+    #healthFlight = new SingleFlight<void>();
     #airplayLogic!: AirPlayLogic;
     #airplayRecovery?: ConnectionRecovery;
     #companionLinkRecovery?: ConnectionRecovery;
@@ -93,10 +97,16 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
 
         await super.onInit();
 
+        this.#healthTimer = setInterval(() => {
+            void this.#healthFlight.run(() => this.#checkConnectionHealth()).catch(err => this.error('Connection health check failed.', err));
+        }, HEALTH_CHECK_INTERVAL);
+        this.#recordConnectionEvent('initialized');
         this.log('Initialized.');
     }
 
     async onUninit(): Promise<void> {
+        if (this.#healthTimer) clearInterval(this.#healthTimer);
+        this.#healthTimer = null;
         this.#stopSlowRecovery();
         this.#airplayRecovery?.dispose();
         this.#companionLinkRecovery?.dispose();
@@ -149,6 +159,7 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
             await this.#tv.connect(credentials);
         } catch (err) {
             this.error('[connection]', 'Failed to connect to Apple TV.', err);
+            this.#recordConnectionEvent('initial-connect-failed', undefined, [err]);
             await this.setUnavailable('Cannot connect to Apple TV.');
 
             requestConnectionRecovery(this.#tv?.airplay, this.#airplayRecovery);
@@ -201,6 +212,7 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
         this.#tv.on('connected', async () => {
             this.#airplayRecovery?.reset();
             this.log('Connected to Apple TV (AirPlay).');
+            this.#recordConnectionEvent('connected', 'AirPlay');
 
             if (this.#tv!.companionLink?.isConnected) {
                 await this.setAvailable();
@@ -213,6 +225,7 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
             }
 
             this.log('Disconnected from Apple TV (AirPlay), reconnecting...');
+            this.#recordConnectionEvent('unexpected-disconnect', 'AirPlay');
             await this.setUnavailable('Disconnected from Apple TV (AirPlay), reconnecting...');
             await this.#airplayLogic.clearNowPlaying();
             this.#airplayRecovery?.handleDisconnect(unexpected);
@@ -244,6 +257,7 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
                 this.#companionLinkRetried = false;
                 this.#stopSlowRecovery();
                 this.log('Connected to Apple TV (Companion Link).');
+                this.#recordConnectionEvent('connected', 'Companion Link');
 
                 if (this.#tv!.airplay.isConnected) {
                     await this.setAvailable();
@@ -256,9 +270,46 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
                 }
 
                 this.log('Disconnected from Apple TV (Companion Link), reconnecting...');
+                this.#recordConnectionEvent('unexpected-disconnect', 'Companion Link');
                 await this.setUnavailable('Disconnected from Apple TV (Companion Link), reconnecting...');
                 this.#companionLinkRecovery?.handleDisconnect(unexpected);
             });
+        }
+    }
+
+    #recordConnectionEvent(event: string, protocol?: string, errors: unknown[] = []): void {
+        try {
+            const key = `appleTvConnectionHistory:${this.discoveryId}`;
+            const previous = this.homey.settings.get(key);
+            const history = Array.isArray(previous) ? previous : [];
+            // Persist only error classifications; protocol payloads and credentials are never stored.
+            const failures = errors.map(error => ({
+                name: error instanceof Error ? error.name : 'UnknownError',
+                code: error && typeof error === 'object' && 'code' in error ? String(error.code) : undefined
+            }));
+            this.homey.settings.set(key, [...history, {
+                at: new Date().toISOString(), event, protocol, failures,
+                airplayConnected: this.#tv?.airplay.isConnected ?? false,
+                companionConnected: this.#tv?.companionLink?.isConnected ?? false
+            }].slice(-80));
+        } catch (err) {
+            this.error('Unable to persist connection diagnostics.', err);
+        }
+    }
+
+    async #checkConnectionHealth(): Promise<void> {
+        const tv = this.#tv;
+        if (!tv) {
+            await this.findServices();
+            return;
+        }
+        // Read connection state without disconnecting or sending playback commands.
+        if (tv.airplay.isConnected && tv.companionLink?.isConnected) return;
+        this.#recordConnectionEvent('health-check-disconnected');
+        await this.setUnavailable('Connection interrupted; automatic recovery in progress.');
+        requestConnectionRecovery(tv.airplay, this.#airplayRecovery);
+        if (!this.#slowRecoveryTimer) {
+            requestConnectionRecovery(tv.companionLink, this.#companionLinkRecovery);
         }
     }
 
@@ -269,7 +320,8 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
         this.#airplayRecovery = new ConnectionRecovery({
             maxAttempts: 3,
             baseDelay: 1000,
-            reconnectInterval: RECONNECT_INTERVAL,
+            // Healthy sessions must never be torn down by a periodic timer.
+            reconnectInterval: 0,
             onReconnect: async () => {
                 const tv = this.#tv;
                 if (!tv) return;
@@ -285,14 +337,17 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
             this.log(`AirPlay recovery attempt ${attempt}...`);
         });
 
-        this.#airplayRecovery.on('failed', () => {
+        this.#airplayRecovery.on('failed', (errors) => {
+            this.#recordConnectionEvent('recovery-failed', 'AirPlay', errors);
             this.error('AirPlay recovery failed after max attempts.');
+            void this.#triggerAirPlayRecoveryFailed();
         });
 
         this.#companionLinkRecovery = new ConnectionRecovery({
             maxAttempts: 3,
             baseDelay: 1000,
-            reconnectInterval: RECONNECT_INTERVAL,
+            // Healthy sessions must never be torn down by a periodic timer.
+            reconnectInterval: 0,
             onReconnect: async () => {
                 const tv = this.#tv;
                 if (!tv?.companionLink) return;
@@ -313,10 +368,26 @@ export default class AppleTVDevice extends DiscoverableDevice<AppleTVDriver> {
             this.log(`Companion Link recovery attempt ${attempt}...`);
         });
 
-        this.#companionLinkRecovery.on('failed', async () => {
+        this.#companionLinkRecovery.on('failed', async (errors) => {
+            this.#recordConnectionEvent('recovery-failed', 'Companion Link', errors);
             this.error('Companion Link recovery failed after max attempts.');
             await this.#onCompanionLinkFailed();
         });
+    }
+
+    async #triggerAirPlayRecoveryFailed(): Promise<void> {
+        const storeKey = 'airplayRecoveryFlowTriggeredAt';
+        const now = Date.now();
+        const lastTriggeredAt = this.getStoreValue(storeKey);
+
+        if (typeof lastTriggeredAt === 'number'
+            && now - lastTriggeredAt < AIRPLAY_RECOVERY_TRIGGER_COOLDOWN) {
+            this.log('AirPlay recovery Flow trigger suppressed by cooldown.');
+            return;
+        }
+
+        await this.setStoreValue(storeKey, now);
+        await this.app.appleTvFlow.triggerAirPlayRecoveryFailed(this);
     }
 
     async #startSlowRecovery(): Promise<void> {

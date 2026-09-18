@@ -42,6 +42,15 @@ export default class AppleTVFlow extends Shortcuts<AppleApp> {
         }
     }
 
+    async triggerAirPlayRecoveryFailed(device: AppleTVDevice): Promise<void> {
+        try {
+            const triggerCard = this.flow.getDeviceTriggerCard('appletv_airplay_recovery_failed');
+            await triggerCard.trigger(device);
+        } catch (err) {
+            this.log(device.name, 'Failed to trigger AirPlay recovery failed card.', err);
+        }
+    }
+
     async triggerArtworkUrlUpdated(device: AppleTVDevice, localUrl: string, cloudUrl: string): Promise<void> {
         try {
             const triggerCard = this.flow.getDeviceTriggerCard('appletv_artwork_url_updated');

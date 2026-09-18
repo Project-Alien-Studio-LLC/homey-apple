@@ -1,6 +1,6 @@
 {
     "name": "com.basmilius.apple",
-    "version": "1.8.1",
+    "version": "1.8.2",
     "scripts": {
         "build": "tsc",
         "test": "npm run build && node --test .homeybuild/test/*.test.js"

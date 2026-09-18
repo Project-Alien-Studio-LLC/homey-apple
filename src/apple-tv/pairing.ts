@@ -72,24 +72,33 @@ export default class AppleTVPairing extends EventEmitter {
         }
 
         const pin = code.join('');
-        this.emit('log', `Pairing to ${this.#device.name} with PIN ${pin}`);
+        this.emit('log', `Pairing to ${this.#device.name}.`);
 
-        await this.#pairingSession.pin(pin);
-        const credentials = await this.#pairingSession.end();
+        try {
+            await this.#pairingSession.pin(pin);
+            const credentials = await this.#pairingSession.end();
 
-        this.#device.store ??= {};
-        this.#device.store.credentials = {
-            accessoryIdentifier: credentials.accessoryIdentifier,
-            accessoryLongTermPublicKey: credentials.accessoryLongTermPublicKey.toString('hex'),
-            pairingId: credentials.pairingId.toString('hex'),
-            publicKey: credentials.publicKey.toString('hex'),
-            secretKey: credentials.secretKey.toString('hex')
-        };
+            this.#device.store ??= {};
+            this.#device.store.credentials = {
+                accessoryIdentifier: credentials.accessoryIdentifier,
+                accessoryLongTermPublicKey: credentials.accessoryLongTermPublicKey.toString('hex'),
+                pairingId: credentials.pairingId.toString('hex'),
+                publicKey: credentials.publicKey.toString('hex'),
+                secretKey: credentials.secretKey.toString('hex')
+            };
 
-        this.#session.showView('add_device')
-            .catch(e => this.emit('log', e));
-
-        return this.#device;
+            // The `pincode` template automatically advances to the next pair
+            // view when this handler resolves. Explicitly calling showView here
+            // races that transition and can prevent the final custom view from
+            // creating the device.
+            return this.#device;
+        } catch (err) {
+            // A failed or expired PIN must not leave the AirPlay socket open:
+            // Apple TV rejects a new pairing attempt while that session remains busy.
+            this.#pairingSession.abort();
+            this.#pairingSession = undefined;
+            throw err;
+        }
     }
 
     async onShowView(view: string): Promise<void> {
