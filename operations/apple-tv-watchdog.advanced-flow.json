@@ -1,0 +1,50 @@
+{
+  "name": "Apple TV AirPlay Watchdog",
+  "enabled": true,
+  "cards": {
+    "trigger": {
+      "id": "homey:manager:cron:every_nth",
+      "type": "trigger",
+      "x": 0,
+      "y": 200,
+      "args": {
+        "n": 1,
+        "type": "minute"
+      },
+      "outputSuccess": [
+        "watchdog"
+      ]
+    },
+    "watchdog": {
+      "id": "homey:app:com.athom.homeyscript:runCode_v2",
+      "type": "condition",
+      "x": 360,
+      "y": 200,
+      "args": {
+        "code": "// Eligibility only: native Homey Restart app card owns the actual recovery.\nconst PREFIX = 'Apple TV AirPlay Watchdog ';\nconst DEVICE_ID = '6d4183e8-a31e-4809-9b77-cddbea3958c5';\nconst WAIT_MS = 5 * 60 * 1000;\nconst COOLDOWN_MS = 30 * 60 * 1000;\nconst MAX_GAP_MS = 90 * 1000;\nconst vars = Object.values(await Homey.logic.getVariables());\nasync function variable(suffix, type, value) {\n    let v = vars.find(item => item.name === PREFIX + suffix);\n    if (!v) {\n        v = await Homey.logic.createVariable({variable: {name: PREFIX + suffix, type, value}});\n        vars.push(v);\n    }\n    if (!v?.id || v.type !== type) throw new Error('Invalid watchdog variable: ' + suffix);\n    return v;\n}\nasync function set(v, value) {\n    await Homey.logic.updateVariable({id: v.id, variable: {value}});\n    v.value = value;\n}\nconst since = await variable('Unavailable Since', 'number', 0);\nconst checked = await variable('Last Check', 'number', 0);\nconst restart = await variable('Last Restart', 'number', 0);\nconst misses = await variable('Misses', 'number', 0);\nconst status = await variable('Status', 'string', 'Starting checks');\nconst saved = await variable('History', 'string', '[]');\nlet history = JSON.parse(saved.value);\nif (!Array.isArray(history)) throw new Error('Invalid watchdog history; recovery held');\nfor (const v of [since, checked, restart, misses]) {\n    if (!Number.isFinite(v.value) || v.value < 0) throw new Error('Invalid watchdog timestamp/count; recovery held');\n}\nasync function record(event, detail) {\n    history.push({at: new Date().toISOString(), event, detail});\n    await set(saved, JSON.stringify(history.slice(-40)));\n}\nasync function reset(text) {\n    await set(since, 0);\n    await set(misses, 0);\n    if (status.value !== text) {\n        await record(text === 'Healthy' ? 'availability-verified' : 'coverage-unknown', text);\n        await set(status, text);\n    }\n}\nconst now = Date.now();\nconst priorCheck = checked.value;\nlet device;\ntry {\n    device = await Homey.devices.getDevice({id: DEVICE_ID});\n} catch (_) {\n    await set(checked, now);\n    await reset('Availability read failed; five-minute confirmation reset');\n    return false;\n}\nawait set(checked, now);\nif (device?.available === true && device.ready === true) {\n    await reset('Healthy');\n    return false;\n}\nconst offline = device?.available === false || device?.ready === false;\nif (!offline) {\n    await reset('Availability unknown; five-minute confirmation reset');\n    return false;\n}\nif (!priorCheck || now < priorCheck || now - priorCheck > MAX_GAP_MS || since.value > now) {\n    await set(since, 0);\n    await set(misses, 0);\n}\nif (!since.value) {\n    await set(since, now);\n    await record('unavailable', 'Starting five-minute confirmation from explicit Homey unavailable/not-ready state');\n}\nawait set(misses, misses.value + 1);\nif (now < restart.value || (restart.value > 0 && now - restart.value < COOLDOWN_MS)) {\n    await set(status, 'Unavailable; app-restart cooldown active');\n    return false;\n}\nif (now - since.value < WAIT_MS) {\n    await set(status, 'Unavailable; waiting for five minutes of confirmed observations');\n    return false;\n}\n// Persist intent before the native restart card. Ambiguous outcomes retain cooldown.\nawait set(restart, now);\nawait set(since, 0);\nawait record('restart-requested', 'Five-minute threshold reached; native card restarts only Apple TV & HomePod app');\nawait set(status, 'Restart requested; recovery requires a later healthy check');\nreturn true;\n"
+      },
+      "outputTrue": [
+        "8cb79052-ef44-4e74-8a37-0b985c8f43a2"
+      ]
+    },
+    "8cb79052-ef44-4e74-8a37-0b985c8f43a2": {
+      "id": "homey:manager:apps:restart_app",
+      "type": "action",
+      "x": 720,
+      "y": 200,
+      "args": {
+        "app": {
+          "id": "com.basmilius.apple",
+          "name": "Apple TV & HomePod"
+        }
+      }
+    },
+    "bbed7aec-608f-45eb-80df-606647b031c8": {
+      "type": "note",
+      "color": "yellow",
+      "x": 0,
+      "y": 0,
+      "value": "Apple TV disconnected/not ready for 5 minutes → restart ONLY Apple TV & HomePod Homey app. Check every minute; healthy/unknown/missing checks reset confirmation. 30-minute cooldown. Paused/idle media is not a failure."
+    }
+  }
+}
